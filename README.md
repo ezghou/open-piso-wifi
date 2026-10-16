@@ -511,6 +511,12 @@ Read our full [Contributing Guidelines](CONTRIBUTING.md) to get started, or open
 
 ---
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=haliknihudas666/open-piso-wifi&type=date&legend=top-left)](https://www.star-history.com/?repos=haliknihudas666%2Fopen-piso-wifi&type=date&legend=top-left)
+
+---
+
 ## 🛡 License & Credits
 
 Developed with ❤️ by **Nicolei Esperida** ([nicolei.games](https://nicolei.games/)) and the **OpenPisoWiFi Community**.  
