@@ -53,6 +53,7 @@ CLI_TOKEN=""
 CLI_PORTAL_IP=""
 CLI_ROUTER_IP=""
 CLI_ADMIN_PIN=""
+CLI_COIN_PIN=""
 NON_INTERACTIVE=false
 
 while [[ $# -gt 0 ]]; do
@@ -77,6 +78,10 @@ while [[ $# -gt 0 ]]; do
             CLI_ADMIN_PIN="$2"
             shift 2
             ;;
+        --coin-pin)
+            CLI_COIN_PIN="$2"
+            shift 2
+            ;;
         --non-interactive|--yes|-y)
             NON_INTERACTIVE=true
             shift
@@ -93,10 +98,15 @@ if [ -z "$GITHUB_TOKEN" ] && [ -f "$HOME/.github_token" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# DISCOVER EXISTING SETTINGS / DEFAULTS
+# DISCOVER DYNAMIC SYSTEM CONFIGURATION & DEFAULTS
 # ------------------------------------------------------------------------------
-DEFAULT_PORTAL_IP="192.168.1.240"
-DEFAULT_ROUTER_IP="192.168.1.1"
+# Dynamically detect active host LAN IP and Router Gateway from system network routes
+DYNAMIC_HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' || true)
+[ -z "$DYNAMIC_HOST_IP" ] && DYNAMIC_HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+DYNAMIC_GATEWAY_IP=$(ip -4 route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' || true)
+
+DEFAULT_PORTAL_IP="${DYNAMIC_HOST_IP:-}"
+DEFAULT_ROUTER_IP="${DYNAMIC_GATEWAY_IP:-}"
 DEFAULT_PORTAL_DOMAIN="wifi.local"
 DEFAULT_PORTAL_PORT="3000"
 DEFAULT_ADMIN_PIN="1234"
@@ -166,6 +176,7 @@ fi
 [ -n "$CLI_PORTAL_IP" ] && DEFAULT_PORTAL_IP="$CLI_PORTAL_IP"
 [ -n "$CLI_ROUTER_IP" ] && DEFAULT_ROUTER_IP="$CLI_ROUTER_IP"
 [ -n "$CLI_ADMIN_PIN" ] && DEFAULT_ADMIN_PIN="$CLI_ADMIN_PIN"
+[ -n "$CLI_COIN_PIN" ] && DEFAULT_COIN_PIN="$CLI_COIN_PIN"
 
 echo -e "${CYAN}==============================================================${NC}"
 echo -e "${GREEN}🚀 Starting OpenPisoWiFi Fast Automated Installation...${NC}"
@@ -186,41 +197,149 @@ ROUTER_MODE="$DEFAULT_ROUTER_MODE"
 COIN_GPIO_PIN="$DEFAULT_COIN_PIN"
 
 # ------------------------------------------------------------------------------
-# INTERACTIVE QUESTIONNAIRE (ENV SETUP)
+# INTERACTIVE TERMINAL DETECTION & INPUT HELPERS
 # ------------------------------------------------------------------------------
-if [ -t 0 ] && [ "$NON_INTERACTIVE" != true ]; then
+# When invoked via `curl ... | sudo bash`, standard input (FD 0) is a pipe from curl.
+# To support interactive input, attach FD 3 to the controlling terminal (/dev/tty).
+IS_INTERACTIVE=false
+TTY_AVAILABLE=false
+
+if [ "$NON_INTERACTIVE" != true ]; then
+    if [ -t 0 ]; then
+        if exec 3<&0 2>/dev/null; then
+            IS_INTERACTIVE=true
+            TTY_AVAILABLE=true
+        fi
+    elif [ -c /dev/tty ] && { exec 3</dev/tty; } 2>/dev/null; then
+        IS_INTERACTIVE=true
+        TTY_AVAILABLE=true
+    fi
+fi
+
+validate_ipv4() {
+    local ip="$1"
+    local rx='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$'
+    if [[ $ip =~ $rx ]]; then
+        local o1="${BASH_REMATCH[1]}"
+        local o2="${BASH_REMATCH[2]}"
+        local o3="${BASH_REMATCH[3]}"
+        local o4="${BASH_REMATCH[4]}"
+        if (( 10#$o1 <= 255 && 10#$o2 <= 255 && 10#$o3 <= 255 && 10#$o4 <= 255 )); then
+            # Disallow 0.0.0.0, 255.255.255.255, loopback (127.0.0.0/8), multicast/reserved (>=224)
+            if [ "$ip" = "0.0.0.0" ] || [ "$ip" = "255.255.255.255" ] || (( 10#$o1 == 127 || 10#$o1 >= 224 )); then
+                return 1
+            fi
+            return 0
+        fi
+    fi
+    return 1
+}
+
+ask_prompt() {
+    local prompt_text="$1"
+    local default_val="$2"
+    local result_var="$3"
+    local input_val=""
+
+    if [ "$IS_INTERACTIVE" = true ] && [ "$TTY_AVAILABLE" = true ]; then
+        read -r -u 3 -p "$prompt_text" input_val || true
+        input_val=$(echo "$input_val" | tr -d '\r\n')
+        if [ -n "$input_val" ]; then
+            printf -v "$result_var" "%s" "$input_val"
+        else
+            printf -v "$result_var" "%s" "$default_val"
+        fi
+    else
+        printf -v "$result_var" "%s" "$default_val"
+    fi
+}
+
+ask_secret() {
+    local prompt_text="$1"
+    local default_val="$2"
+    local result_var="$3"
+    local input_val=""
+
+    if [ "$IS_INTERACTIVE" = true ] && [ "$TTY_AVAILABLE" = true ]; then
+        read -r -s -u 3 -p "$prompt_text" input_val || true
+        echo "" >&2
+        input_val=$(echo "$input_val" | tr -d '\r\n')
+        if [ -n "$input_val" ]; then
+            printf -v "$result_var" "%s" "$input_val"
+        else
+            printf -v "$result_var" "%s" "$default_val"
+        fi
+    else
+        printf -v "$result_var" "%s" "$default_val"
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# INTERACTIVE QUESTIONNAIRE (ENV & HARDWARE SETUP)
+# ------------------------------------------------------------------------------
+if [ "$IS_INTERACTIVE" = true ]; then
     echo -e "${CYAN}--------------------------------------------------------------${NC}"
-    echo -e "${GREEN}⚙️  First-Time Setup: Environment & Hardware Configuration${NC}"
+    echo -e "${GREEN}⚙️  First-Time Setup: Hardware & Network Configuration${NC}"
     echo -e "${CYAN}--------------------------------------------------------------${NC}"
-    echo -e "Please configure your system parameters."
-    echo -e "Press [Enter] on any prompt to accept the default in brackets.\n"
+    echo -e "Configure your OpenPisoWiFi setup."
+    echo -e "Press ${YELLOW}[Enter]${NC} on any prompt to accept the default in brackets.\n"
 
-    # Section A: Network & Router
-    echo -e "${PURPLE}[A] Network & Router Settings${NC}"
-    echo -e "  💡 Tip: Router IP remains untouched (192.168.1.1). Portal address is 192.168.1.240 (accessible via wifi.local or 10.0.0.1)."
-    read -r -p "  • OpenWrt Router Gateway IP  [$DEFAULT_ROUTER_IP]: " INPUT_ROUTER_IP
-    ROUTER_IP="${INPUT_ROUTER_IP:-$DEFAULT_ROUTER_IP}"
+    # Section A: Network & Device Addresses
+    echo -e "${PURPLE}[A] Network & Device Addresses${NC}"
+    echo -e "  💡 Tip: RPi LAN IP serves the captive portal; router IP connects to your OpenWrt gateway."
+    if [ -n "$DYNAMIC_HOST_IP" ]; then
+        echo -e "  🔍 Auto-detected Device IP:  ${GREEN}${DYNAMIC_HOST_IP}${NC}"
+    fi
+    if [ -n "$DYNAMIC_GATEWAY_IP" ]; then
+        echo -e "  🔍 Auto-detected Gateway IP: ${GREEN}${DYNAMIC_GATEWAY_IP}${NC}"
+    fi
 
-    read -r -p "  • Raspberry Pi Static LAN IP [$DEFAULT_PORTAL_IP]: " INPUT_PORTAL_IP
-    PORTAL_IP="${INPUT_PORTAL_IP:-$DEFAULT_PORTAL_IP}"
+    # 1. Raspberry Pi Static LAN IP (Strictly Required & Validated)
+    while true; do
+        if [ -n "$DEFAULT_PORTAL_IP" ]; then
+            ask_prompt "  • Raspberry Pi LAN IP (Required) [$DEFAULT_PORTAL_IP]: " "$DEFAULT_PORTAL_IP" PORTAL_IP
+        else
+            ask_prompt "  • Raspberry Pi LAN IP (Required, e.g. 192.168.1.50): " "" PORTAL_IP
+        fi
 
-    read -r -p "  • Local Portal Domain Name   [$DEFAULT_PORTAL_DOMAIN]: " INPUT_PORTAL_DOMAIN
-    PORTAL_DOMAIN="${INPUT_PORTAL_DOMAIN:-$DEFAULT_PORTAL_DOMAIN}"
+        if [ -z "$PORTAL_IP" ]; then
+            echo -e "    ${RED}❌ Raspberry Pi LAN IP is required. Please enter a valid IPv4 address.${NC}"
+        elif ! validate_ipv4 "$PORTAL_IP"; then
+            echo -e "    ${RED}❌ '${PORTAL_IP}' is not a valid IPv4 address. Each octet must be 0-255.${NC}"
+        else
+            break
+        fi
+    done
 
-    # Section B: Web Portal & Admin
+    # 2. OpenWrt Router Gateway IP (Strictly Required & Validated)
+    while true; do
+        if [ -n "$DEFAULT_ROUTER_IP" ]; then
+            ask_prompt "  • OpenWrt Router Gateway IP  (Required) [$DEFAULT_ROUTER_IP]: " "$DEFAULT_ROUTER_IP" ROUTER_IP
+        else
+            ask_prompt "  • OpenWrt Router Gateway IP  (Required, e.g. 192.168.1.1): " "" ROUTER_IP
+        fi
+
+        if [ -z "$ROUTER_IP" ]; then
+            echo -e "    ${RED}❌ OpenWrt Router Gateway IP is required.${NC}"
+        elif ! validate_ipv4 "$ROUTER_IP"; then
+            echo -e "    ${RED}❌ '${ROUTER_IP}' is not a valid IPv4 address.${NC}"
+        elif [ "$ROUTER_IP" = "$PORTAL_IP" ]; then
+            echo -e "    ${RED}❌ Router Gateway IP cannot be identical to Raspberry Pi IP (${PORTAL_IP}).${NC}"
+        else
+            break
+        fi
+    done
+
+    ask_prompt "  • Local Portal Domain Name   [$DEFAULT_PORTAL_DOMAIN]: " "$DEFAULT_PORTAL_DOMAIN" PORTAL_DOMAIN
+
+    # Section B: Security & Administration
     echo ""
-    echo -e "${PURPLE}[B] Web Portal & Captive Paywall Settings${NC}"
-    read -r -p "  • Captive Portal HTTP Port   [$DEFAULT_PORTAL_PORT]: " INPUT_PORTAL_PORT
-    PORTAL_PORT="${INPUT_PORTAL_PORT:-$DEFAULT_PORTAL_PORT}"
-
-    read -r -p "  • Admin Dashboard PIN        [$DEFAULT_ADMIN_PIN]: " INPUT_ADMIN_PIN
-    ADMIN_PIN="${INPUT_ADMIN_PIN:-$DEFAULT_ADMIN_PIN}"
+    echo -e "${PURPLE}[B] Security & Administration${NC}"
+    ask_prompt "  • Admin Dashboard PIN        [$DEFAULT_ADMIN_PIN]: " "$DEFAULT_ADMIN_PIN" ADMIN_PIN
 
     if [ -z "$GITHUB_TOKEN" ]; then
         echo -e "  • GitHub Personal Access Token (for OTA updates on private repo):"
-        read -r -s -p "    Enter Token (press Enter to skip): " INPUT_TOKEN
-        echo ""
-        GITHUB_TOKEN="${INPUT_TOKEN:-}"
+        ask_secret "    Enter Token (press Enter to skip): " "" GITHUB_TOKEN
     else
         echo -e "  • GitHub Token:              ${GREEN}Detected (${GITHUB_TOKEN:0:6}...)${NC}"
     fi
@@ -228,32 +347,57 @@ if [ -t 0 ] && [ "$NON_INTERACTIVE" != true ]; then
     # Section C: Hardware Daemon & Coin Acceptor
     echo ""
     echo -e "${PURPLE}[C] Hardware Daemon & Coin Acceptor Settings${NC}"
-    read -r -p "  • Daemon Internal Port       [$DEFAULT_DAEMON_PORT]: " INPUT_DAEMON_PORT
-    DAEMON_PORT="${INPUT_DAEMON_PORT:-$DEFAULT_DAEMON_PORT}"
+    echo -e "  💡 Tip: Coin slot GPIO pin can also be changed anytime in Admin Dashboard Settings."
+    ask_prompt "  • Coin Slot Physical GPIO (can change in admin) [$DEFAULT_COIN_PIN]: " "$DEFAULT_COIN_PIN" COIN_GPIO_PIN
 
-    read -r -p "  • Coin Slot Physical GPIO    [$DEFAULT_COIN_PIN]: " INPUT_COIN_PIN
-    COIN_GPIO_PIN="${INPUT_COIN_PIN:-$DEFAULT_COIN_PIN}"
-
-    read -r -p "  • OpenWrt SSH User           [$DEFAULT_SSH_USER]: " INPUT_SSH_USER
-    ROUTER_SSH_USER="${INPUT_SSH_USER:-$DEFAULT_SSH_USER}"
-
-    read -r -p "  • OpenWrt SSH Port           [$DEFAULT_SSH_PORT]: " INPUT_SSH_PORT
-    ROUTER_SSH_PORT="${INPUT_SSH_PORT:-$DEFAULT_SSH_PORT}"
-
-    read -r -p "  • Router Firewall Mode (fw4_nftables/fw3_iptables) [$DEFAULT_ROUTER_MODE]: " INPUT_ROUTER_MODE
-    ROUTER_MODE="${INPUT_ROUTER_MODE:-$DEFAULT_ROUTER_MODE}"
+    # Section D: Advanced Service Settings
+    echo ""
+    echo -e "${PURPLE}[D] Advanced Service Settings (Optional)${NC}"
+    ask_prompt "  • Captive Portal HTTP Port   [$DEFAULT_PORTAL_PORT]: " "$DEFAULT_PORTAL_PORT" PORTAL_PORT
+    ask_prompt "  • Daemon Internal Port       [$DEFAULT_DAEMON_PORT]: " "$DEFAULT_DAEMON_PORT" DAEMON_PORT
+    ask_prompt "  • OpenWrt SSH User           [$DEFAULT_SSH_USER]: " "$DEFAULT_SSH_USER" ROUTER_SSH_USER
+    ask_prompt "  • OpenWrt SSH Port           [$DEFAULT_SSH_PORT]: " "$DEFAULT_SSH_PORT" ROUTER_SSH_PORT
+    ask_prompt "  • Router Firewall Mode (fw4_nftables/fw3_iptables) [$DEFAULT_ROUTER_MODE]: " "$DEFAULT_ROUTER_MODE" ROUTER_MODE
 
     echo ""
     echo -e "${CYAN}--------------------------------------------------------------${NC}"
     echo -e "${GREEN}✓ Configuration saved for installation.${NC}"
     echo -e "${CYAN}--------------------------------------------------------------${NC}"
     echo ""
+else
+    # Non-interactive mode validation
+    if [ -z "$PORTAL_IP" ]; then
+        if [ -n "$DEFAULT_PORTAL_IP" ] && validate_ipv4 "$DEFAULT_PORTAL_IP"; then
+            PORTAL_IP="$DEFAULT_PORTAL_IP"
+            echo -e "--> Auto-detected Raspberry Pi LAN IP: ${YELLOW}${PORTAL_IP}${NC}"
+        else
+            echo -e "${RED}Error: Raspberry Pi LAN IP is required and could not be detected.${NC}"
+            echo -e "${RED}Please specify --ip <valid_ipv4> or run installer interactively.${NC}"
+            exit 1
+        fi
+    elif ! validate_ipv4 "$PORTAL_IP"; then
+        echo -e "${RED}Error: Specified --ip '${PORTAL_IP}' is not a valid IPv4 address.${NC}"
+        exit 1
+    fi
+
+    if [ -z "$ROUTER_IP" ]; then
+        if [ -n "$DEFAULT_ROUTER_IP" ] && validate_ipv4 "$DEFAULT_ROUTER_IP"; then
+            ROUTER_IP="$DEFAULT_ROUTER_IP"
+        else
+            echo -e "${RED}Error: OpenWrt Router Gateway IP is required and could not be detected.${NC}"
+            echo -e "${RED}Please specify --router-ip <valid_ipv4> or run installer interactively.${NC}"
+            exit 1
+        fi
+    elif ! validate_ipv4 "$ROUTER_IP"; then
+        echo -e "${RED}Error: Specified --router-ip '${ROUTER_IP}' is not a valid IPv4 address.${NC}"
+        exit 1
+    fi
 fi
 
 echo -e "• Raspberry Pi LAN IP: ${YELLOW}${PORTAL_IP}:${PORTAL_PORT}${NC}"
 echo -e "• OpenWrt Router:      ${YELLOW}${ROUTER_SSH_USER}@${ROUTER_IP}:${ROUTER_SSH_PORT} (${ROUTER_MODE})${NC}"
 echo -e "• Admin Security PIN:  ${YELLOW}${ADMIN_PIN}${NC}"
-echo -e "• Coin Slot GPIO:      ${YELLOW}GPIO ${COIN_GPIO_PIN}${NC}"
+echo -e "• Coin Slot GPIO:      ${YELLOW}GPIO ${COIN_GPIO_PIN}${NC} (changeable in Admin)"
 echo -e "• Daemon Port:         ${YELLOW}${DAEMON_PORT}${NC}"
 echo ""
 
@@ -357,11 +501,10 @@ if [ "$ALREADY_EXTRACTED" = false ]; then
         JSON=$(echo "$RES" | sed '$d')
 
         if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "401" ]; then
-            if [ -t 0 ] && [ -z "$GITHUB_TOKEN" ]; then
+            if [ "$IS_INTERACTIVE" = true ] && [ -z "$GITHUB_TOKEN" ]; then
                 echo -e "${YELLOW}🔒 Repository appears private or requires authentication.${NC}"
                 echo -e "${CYAN}Please enter your GitHub Personal Access Token (PAT) with 'repo' scope:${NC}"
-                read -r -s -p "GitHub Token: " GITHUB_TOKEN
-                echo ""
+                ask_secret "GitHub Token: " "" GITHUB_TOKEN
                 if [ -n "$GITHUB_TOKEN" ]; then
                     RES=$(fetch_api "$GITHUB_TOKEN")
                     HTTP_CODE=$(echo "$RES" | tail -n1)
@@ -614,3 +757,6 @@ echo -e "📡 Router Deployment Next Step:"
 echo -e "  Run the following command to deploy and configure your OpenWrt router:"
 echo -e "  ${YELLOW}bash ${ROOT_DIR}/scripts/deploy-router.sh --fresh${NC}"
 echo -e "${CYAN}==============================================================${NC}"
+
+# Close interactive input FD if open
+exec 3<&- 2>/dev/null || true

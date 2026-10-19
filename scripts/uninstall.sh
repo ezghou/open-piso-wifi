@@ -185,16 +185,28 @@ echo ""
 # ------------------------------------------------------------------------------
 # INTERACTIVE CONFIRMATION & QUESTIONNAIRE
 # ------------------------------------------------------------------------------
-if [ "$NON_INTERACTIVE" = false ] && [ -t 0 ]; then
+IS_INTERACTIVE=false
+if [ "$NON_INTERACTIVE" = false ]; then
+    if [ -t 0 ]; then
+        if exec 3<&0 2>/dev/null; then
+            IS_INTERACTIVE=true
+        fi
+    elif [ -c /dev/tty ] && { exec 3</dev/tty; } 2>/dev/null; then
+        IS_INTERACTIVE=true
+    fi
+fi
+
+if [ "$IS_INTERACTIVE" = true ]; then
     echo -e "${YELLOW}This script will remove OpenPisoWiFi services and system configurations.${NC}"
     echo ""
-    read -r -p "Are you sure you want to uninstall OpenPisoWiFi? [y/N]: " CONFIRM_UNINSTALL
+    read -r -u 3 -p "Are you sure you want to uninstall OpenPisoWiFi? [y/N]: " CONFIRM_UNINSTALL
     case "$CONFIRM_UNINSTALL" in
         [yY]|[yY][eE][sS])
             echo ""
             ;;
         *)
             echo -e "${GREEN}Uninstallation cancelled.${NC}"
+            exec 3<&- 2>/dev/null || true
             exit 0
             ;;
     esac
@@ -205,7 +217,7 @@ if [ "$NON_INTERACTIVE" = false ] && [ -t 0 ]; then
         echo -e "${PURPLE}Data & Configuration Retention:${NC}"
         echo -e "  Do you want to KEEP your database (sales, sessions, vouchers) and .env files,"
         echo -e "  or permanently PURGE all data?"
-        read -r -p "  Keep database and configurations? [Y/n]: " KEEP_REPLY
+        read -r -u 3 -p "  Keep database and configurations? [Y/n]: " KEEP_REPLY
         case "$KEEP_REPLY" in
             [nN]|[nN][oO])
                 PURGE_DATA=true
@@ -225,7 +237,7 @@ if [ "$NON_INTERACTIVE" = false ] && [ -t 0 ]; then
         echo -e "${PURPLE}OpenWrt Router Cleanup:${NC}"
         echo -e "  Do you also want to remove OpenPisoWiFi firewall rules & DNS configurations"
         echo -e "  from your OpenWrt router (${ROUTER_SSH_USER}@${ROUTER_IP}:${ROUTER_SSH_PORT})?"
-        read -r -p "  Clean OpenWrt router as well? [y/N]: " ROUTER_REPLY
+        read -r -u 3 -p "  Clean OpenWrt router as well? [y/N]: " ROUTER_REPLY
         case "$ROUTER_REPLY" in
             [yY]|[yY][eE][sS])
                 CLEAN_ROUTER=true
@@ -245,7 +257,7 @@ if [ "$NON_INTERACTIVE" = false ] && [ -t 0 ]; then
             echo -e "${CYAN}--------------------------------------------------------------${NC}"
             echo -e "${PURPLE}Host Network Configuration (/etc/dhcpcd.conf):${NC}"
             echo -e "  A static IP configuration was found in /etc/dhcpcd.conf."
-            read -r -p "  Revert /etc/dhcpcd.conf static IP back to default DHCP? [y/N]: " NET_REPLY
+            read -r -u 3 -p "  Revert /etc/dhcpcd.conf static IP back to default DHCP? [y/N]: " NET_REPLY
             case "$NET_REPLY" in
                 [yY]|[yY][eE][sS])
                     REVERT_NETWORK=true
@@ -258,6 +270,7 @@ if [ "$NON_INTERACTIVE" = false ] && [ -t 0 ]; then
     fi
 
     echo ""
+    exec 3<&- 2>/dev/null || true
 fi
 
 # ------------------------------------------------------------------------------

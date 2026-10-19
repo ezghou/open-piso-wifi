@@ -19,10 +19,14 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Read defaults from portal or daemon .env if present
-ROUTER_IP="192.168.1.1"
+# Dynamically detect active host LAN IP and Router Gateway from system network routes
+DYNAMIC_HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' || hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+DYNAMIC_GATEWAY_IP=$(ip -4 route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' || echo "")
+
+# Read defaults from portal or daemon .env if present, otherwise use dynamic detection
+ROUTER_IP="${DYNAMIC_GATEWAY_IP:-192.168.1.1}"
 ROUTER_USER="root"
-PORTAL_IP="192.168.1.240"
+PORTAL_IP="${DYNAMIC_HOST_IP:-}"
 PORTAL_DOMAIN="wifi.local"
 PORTAL_PORT="3000"
 
@@ -81,6 +85,12 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [ -z "$PORTAL_IP" ]; then
+    echo -e "${RED}Error: Raspberry Pi Portal IP is required and could not be detected.${NC}"
+    echo -e "${RED}Please pass --portal-ip=<valid_ipv4> (e.g. --portal-ip=192.168.1.50)${NC}"
+    exit 1
+fi
 
 echo -e "${CYAN}==============================================================${NC}"
 if [ "$DEPLOY_MODE" = "update" ]; then

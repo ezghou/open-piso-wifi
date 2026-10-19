@@ -176,11 +176,22 @@ if command -v curl >/dev/null 2>&1; then
             echo -e "${YELLOW}🔒 Repository '${GITHUB_REPO}' is private or requires authentication (HTTP 404).${NC}"
         fi
 
-        # Prompt interactively if run from terminal
+        # Determine interactive terminal capability (handles curl ... | sudo bash)
+        IS_INTERACTIVE=false
         if [ -t 0 ]; then
+            if exec 3<&0 2>/dev/null; then
+                IS_INTERACTIVE=true
+            fi
+        elif [ -c /dev/tty ] && { exec 3</dev/tty; } 2>/dev/null; then
+            IS_INTERACTIVE=true
+        fi
+
+        # Prompt interactively if run from terminal
+        if [ "$IS_INTERACTIVE" = true ]; then
             echo -e "${CYAN}Please enter your GitHub Personal Access Token (PAT) with 'repo' read scope:${NC}"
-            read -r -s -p "GitHub Token: " PROMPTED_TOKEN
+            read -r -s -u 3 -p "GitHub Token: " PROMPTED_TOKEN
             echo ""
+            exec 3<&- 2>/dev/null || true
             if [ -n "$PROMPTED_TOKEN" ]; then
                 GITHUB_TOKEN="$PROMPTED_TOKEN"
                 RELEASE_RESPONSE=$(query_github_release "$GITHUB_TOKEN")
@@ -430,11 +441,18 @@ echo -e "${PURPLE}[5/6] Updating OpenWrt Router configuration (Preserving State)
 
 ROUTER_IP="${ROUTER_IP:-192.168.1.1}"
 ROUTER_USER="${ROUTER_USER:-root}"
-PORTAL_IP="${PORTAL_IP:-192.168.1.240}"
+PORTAL_IP="${PORTAL_IP:-}"
 PORTAL_DOMAIN="${PORTAL_DOMAIN:-wifi.local}"
 SETUP_SCRIPT="$ROOT_DIR/openwrt/setup-openwrt.sh"
 
-if [ -f "$ROOT_DIR/pisowifi-portal/.env" ]; then
+if [ -f "$PORTAL_DIR/.env" ]; then
+    ENV_ROUTER_IP=$(grep -E '^ROUTER_IP=' "$PORTAL_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    [ -n "$ENV_ROUTER_IP" ] && ROUTER_IP="$ENV_ROUTER_IP"
+    ENV_PORTAL_IP=$(grep -E '^PORTAL_IP=' "$PORTAL_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    [ -n "$ENV_PORTAL_IP" ] && PORTAL_IP="$ENV_PORTAL_IP"
+    ENV_PORTAL_DOMAIN=$(grep -E '^PORTAL_DOMAIN=' "$PORTAL_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    [ -n "$ENV_PORTAL_DOMAIN" ] && PORTAL_DOMAIN="$ENV_PORTAL_DOMAIN"
+elif [ -f "$ROOT_DIR/pisowifi-portal/.env" ]; then
     ENV_ROUTER_IP=$(grep -E '^ROUTER_IP=' "$ROOT_DIR/pisowifi-portal/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
     [ -n "$ENV_ROUTER_IP" ] && ROUTER_IP="$ENV_ROUTER_IP"
     ENV_PORTAL_IP=$(grep -E '^PORTAL_IP=' "$ROOT_DIR/pisowifi-portal/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
@@ -443,7 +461,14 @@ if [ -f "$ROOT_DIR/pisowifi-portal/.env" ]; then
     [ -n "$ENV_PORTAL_DOMAIN" ] && PORTAL_DOMAIN="$ENV_PORTAL_DOMAIN"
 fi
 
-if [ -f "$ROOT_DIR/pisowifi-daemon/.env" ]; then
+if [ -z "$PORTAL_IP" ]; then
+    PORTAL_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' || hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+fi
+
+if [ -f "$DAEMON_DIR/.env" ]; then
+    ENV_ROUTER_USER=$(grep -E '^ROUTER_SSH_USER=' "$DAEMON_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    [ -n "$ENV_ROUTER_USER" ] && ROUTER_USER="$ENV_ROUTER_USER"
+elif [ -f "$ROOT_DIR/pisowifi-daemon/.env" ]; then
     ENV_ROUTER_USER=$(grep -E '^ROUTER_SSH_USER=' "$ROOT_DIR/pisowifi-daemon/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
     [ -n "$ENV_ROUTER_USER" ] && ROUTER_USER="$ENV_ROUTER_USER"
 fi
